@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -7,7 +8,7 @@ REPO_ROOT = PROJECT_ROOT.parent
 ZIP_PATH = REPO_ROOT / 'Lanzones.v1i.yolo26.zip'
 DATA_DIR = PROJECT_ROOT / 'data'
 MODELS_DIR = PROJECT_ROOT / 'models'
-MODEL_PATH = MODELS_DIR / 'best.pt'
+MODEL_PATH = Path(os.environ['MODEL_PATH']) if 'MODEL_PATH' in os.environ else MODELS_DIR / 'best.pt'
 
 CLASS_NAMES = ['dried-leaf', 'healthy', 'leaf-rust', 'powdery-mildew']
 
@@ -20,8 +21,6 @@ ACCEPTED_MIME = frozenset({'image/jpeg', 'image/png', 'image/webp'})
 PRETRAINED_WEIGHTS = 'yolov8s.pt'
 DEFAULT_EPOCHS = 50
 DEFAULT_DEVICE = 'mps'
-
-import os
 
 JWT_SECRET = os.environ.get('JWT_SECRET')
 JWT_ALGORITHM = os.environ.get('JWT_ALGORITHM', 'HS256')
