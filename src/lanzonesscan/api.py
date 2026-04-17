@@ -15,7 +15,7 @@ from slowapi.errors import RateLimitExceeded
 from lanzonesscan import config
 from lanzonesscan.auth import get_current_subject
 from lanzonesscan.config import ACCEPTED_MIME, DEFAULT_CONF, MODEL_PATH
-from lanzonesscan.inference import Detection, LeafDetector
+from lanzonesscan.inference import Detection, LanzonesDetector
 from lanzonesscan.rate_limit import key_by_ip, key_by_sub, limiter, rate_limit_handler
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 	logging.basicConfig(level=logging.INFO)
 	config.require_jwt_secret()
 	if not getattr(app.state, 'detector', None):
-		app.state.detector = LeafDetector(MODEL_PATH)
+		app.state.detector = LanzonesDetector(MODEL_PATH)
 	yield
 
 
@@ -37,7 +37,7 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
 
-def get_detector(request: Request) -> LeafDetector:
+def get_detector(request: Request) -> LanzonesDetector:
 	return request.app.state.detector
 
 
@@ -58,7 +58,7 @@ def analyze(
 	conf: float = Query(DEFAULT_CONF, ge=0.0, le=1.0),
 	annotated: bool = Query(False),
 	subject: str = Depends(get_current_subject),
-	detector: LeafDetector = Depends(get_detector)
+	detector: LanzonesDetector = Depends(get_detector)
 ) -> dict[str, Any]:
 	if file.content_type not in ACCEPTED_MIME:
 		raise HTTPException(status_code=415, detail=f'Unsupported content-type: {file.content_type}')

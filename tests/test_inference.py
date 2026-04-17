@@ -7,7 +7,7 @@ from PIL import Image
 
 from lanzonesscan import config
 from lanzonesscan.config import MODEL_PATH
-from lanzonesscan.inference import Detection, LeafDetector
+from lanzonesscan.inference import Detection, LanzonesDetector
 
 
 def _make_mock_yolo_result(
@@ -34,14 +34,14 @@ def _make_mock_yolo_result(
 def test_detector_init_missing_weights_raises(tmp_path: Path):
 	missing = tmp_path / 'nope.pt'
 	with pytest.raises(FileNotFoundError, match='nope.pt'):
-		LeafDetector(missing)
+		LanzonesDetector(missing)
 
 
 @patch('lanzonesscan.inference.YOLO')
 def test_detector_init_loads_model(mock_yolo_cls: MagicMock, tmp_path: Path) -> None:
 	weights = tmp_path / 'best.pt'
 	weights.write_bytes(b'fake')
-	LeafDetector(weights)
+	LanzonesDetector(weights)
 	mock_yolo_cls.assert_called_once_with(str(weights))
 
 
@@ -59,7 +59,7 @@ def test_predict_returns_structured_detections(mock_yolo_cls: MagicMock, tmp_pat
 	]
 	mock_yolo_cls.return_value = mock_model
 
-	detector = LeafDetector(weights)
+	detector = LanzonesDetector(weights)
 	detections = detector.predict(sample_jpeg_bytes, conf=0.25)
 
 	assert isinstance(detections, list)
@@ -80,7 +80,7 @@ def test_predict_empty_results(mock_yolo_cls: MagicMock, tmp_path: Path, sample_
 	]
 	mock_yolo_cls.return_value = mock_model
 
-	detector = LeafDetector(weights)
+	detector = LanzonesDetector(weights)
 	assert detector.predict(sample_jpeg_bytes) == []
 
 
@@ -90,7 +90,7 @@ def test_annotate_returns_valid_png_with_drawn_box(mock_yolo_cls: MagicMock, tmp
 	weights.write_bytes(b'fake')
 	mock_yolo_cls.return_value = MagicMock()
 
-	detector = LeafDetector(weights)
+	detector = LanzonesDetector(weights)
 	detections: list[Detection] = [
 		{'class': 'leaf-rust', 'confidence': 0.9, 'bbox': [5.0, 5.0, 40.0, 40.0]}
 	]
@@ -108,7 +108,7 @@ def test_predict_invalid_image_raises(tmp_path: Path):
 	weights = tmp_path / 'best.pt'
 	weights.write_bytes(b'fake')
 	with patch('lanzonesscan.inference.YOLO'):
-		detector = LeafDetector(weights)
+		detector = LanzonesDetector(weights)
 		with pytest.raises(ValueError, match='Invalid image'):
 			detector.predict(b'not an image', conf=0.25)
 
@@ -118,7 +118,7 @@ def test_predict_invalid_image_raises(tmp_path: Path):
 	reason='Real model weights missing — run `python -m lanzonesscan.train` to enable this test'
 )
 def test_predict_against_real_model(sample_jpeg_bytes: bytes):
-	detector = LeafDetector(MODEL_PATH)
+	detector = LanzonesDetector(MODEL_PATH)
 	detections = detector.predict(sample_jpeg_bytes, conf=0.01)
 	assert isinstance(detections, list)
 	for d in detections:

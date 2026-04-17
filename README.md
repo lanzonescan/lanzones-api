@@ -1,6 +1,6 @@
-# Lanzones Leaf Scan API
+# Lanzones Scan API
 
-A FastAPI service that detects lanzones leaf conditions (`dried-leaf`, `healthy`, `leaf-rust`, `powdery-mildew`) from an uploaded image using a YOLOv8s model trained on the Roboflow `lanzones-qdaaq` dataset.
+A FastAPI service that detects lanzones crop conditions from an uploaded image using a YOLOv8s model. The initial model targets leaf conditions (`dried-leaf`, `healthy`, `leaf-rust`, `powdery-mildew`) and is designed to extend to insect and fruit detection as future models ship.
 
 ---
 
@@ -32,7 +32,7 @@ client ──HTTPS──▶ Dokploy (Traefik) ──▶ FastAPI container ──
 
 - Stateless HTTP service, one YOLO model instance per container.
 - Weights are fetched from a GitHub Release during Docker build — the repo never contains model binaries.
-- No database. Rate-limit state is in-memory by default; swap to Redis via `RATE_LIMIT_STORAGE_URI` for multi-replica deployments.
+- No database. Rate-limit state is held in process memory. For predictable limits, run a single replica; multiple replicas enforce limits independently.
 
 ### Project layout
 
@@ -48,7 +48,7 @@ model-api/
 │   ├── auth.py               # JWT bearer dependency
 │   ├── rate_limit.py         # SlowAPI limiter + handler
 │   ├── config.py             # env-driven config
-│   ├── inference.py          # LeafDetector wrapper around ultralytics YOLO
+│   ├── inference.py          # LanzonesDetector wrapper around ultralytics YOLO
 │   ├── train.py              # YOLOv8 training entrypoint (dev only)
 │   └── data_setup.py         # unpacks the Roboflow zip (dev only)
 └── tests/                    # pytest suite
@@ -73,7 +73,7 @@ model-api/
 
 ### Key invariants
 
-- **`LeafDetector` is not thread-safe.** Each container runs a single uvicorn worker (`--workers 1`). Scale horizontally via Dokploy replicas, not vertically via more workers.
+- **`LanzonesDetector` is not thread-safe.** Each container runs a single uvicorn worker (`--workers 1`). Scale horizontally via Dokploy replicas, not vertically via more workers.
 - **Model is loaded once at startup** in the FastAPI lifespan hook, not per request.
 - **`JWT_SECRET` is required at startup.** The lifespan hook calls `config.require_jwt_secret()` and the process fails fast if it is missing.
 - **Weights path is env-driven.** `MODEL_PATH` env var overrides the default `models/best.pt`. In the Docker image it is set to `/app/models/best.pt`.
@@ -143,7 +143,6 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | `JWT_LEEWAY_SECONDS` | `0` | no | Clock skew tolerance for `exp` / `nbf`. |
 | `JWT_ISSUER` | unset | no | If set, `iss` claim must match. |
 | `JWT_AUDIENCE` | unset | no | If set, `aud` claim must match. |
-| `RATE_LIMIT_STORAGE_URI` | `memory://` | no | SlowAPI storage. Use `redis://host:6379/0` for multi-replica. |
 | `RATE_LIMIT_PER_SUB` | `10/minute` | no | Per-JWT-subject limit. SlowAPI syntax. |
 | `RATE_LIMIT_PER_IP` | `30/minute` | no | Per-IP limit. |
 | `MODEL_PATH` | `./models/best.pt` | no | Absolute path to YOLO weights. Set to `/app/models/best.pt` in the Docker image. |
@@ -218,7 +217,7 @@ The dataset is auto-extracted from `../Lanzones.v1i.yolo26.zip` on first run int
 pytest
 ```
 
-The suite covers auth failures, rate-limit headers, data setup, and mocked inference. It does not require a real `best.pt`; a fixture patches `LeafDetector`.
+The suite covers auth failures, rate-limit headers, data setup, and mocked inference. It does not require a real `best.pt`; a fixture patches `LanzonesDetector`.
 
 ---
 
@@ -329,10 +328,9 @@ Optional:
 ```
 JWT_ISSUER=https://auth.yourdomain.com
 JWT_AUDIENCE=lanzonesscan
-RATE_LIMIT_STORAGE_URI=redis://<redis-host>:6379/0
 ```
 
-If you run more than one replica, **point `RATE_LIMIT_STORAGE_URI` at a shared Redis** — otherwise each replica enforces its own local counters and users can exceed limits by hitting different instances.
+Rate-limit state is per-process. If you run more than one replica, each enforces its own counters — users may exceed the nominal limit by hitting different instances. Keep a single replica unless you're willing to tolerate this.
 
 ### 4. Networking
 
@@ -353,7 +351,7 @@ Click **Deploy**. First build takes 3–5 minutes (torch CPU + ultralytics). Sub
 ### 7. Scaling
 
 - **Vertical**: useless — one model per uvicorn worker and the detector isn't thread-safe.
-- **Horizontal**: increase replicas in Dokploy. Each replica needs ~300 MB RAM for the model plus runtime overhead. Attach a shared Redis for rate-limit state.
+- **Horizontal**: increase replicas in Dokploy. Each replica needs ~300 MB RAM for the model plus runtime overhead. Rate-limit counters are per-replica — each replica will independently allow up to its configured limit.
 
 ---
 
@@ -381,7 +379,7 @@ docker logs -f <container-id>
 | Build fails at `curl ... best.pt` | Bad `WEIGHTS_URL` or private repo without token | Verify URL in a browser; add `GITHUB_TOKEN` for private repos |
 | Build fails with `401 Bad credentials` | PAT lacks `Contents: read` on the repo | Regenerate token with correct scope |
 | `FileNotFoundError: Model weights not found at ...` | `MODEL_PATH` doesn't match where weights landed | Ensure `MODEL_PATH=/app/models/best.pt` in the image (already set by Dockerfile) |
-| 429s under light load with multiple replicas | Local in-memory limiter per replica | Set `RATE_LIMIT_STORAGE_URI` to a shared Redis |
+| Inconsistent rate-limit behavior across requests | Each replica has its own in-memory counter | Run a single replica, or raise limits to account for N replicas |
 | Slow first request after deploy | Lazy CUDA init / cold torch import | Ignore — model is already loaded; the first `predict` does some per-class setup |
 | High memory on a single replica | Ran with `--workers >1` somewhere | Keep `--workers 1`; use replicas instead |
 

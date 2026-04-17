@@ -19,7 +19,7 @@ _BOX_COLORS = {
 }
 
 
-class LeafDetector:
+class LanzonesDetector:
 	'''YOLO wrapper. Not thread-safe — callers must serialize access to predict().'''
 	def __init__(self, model_path: Path):
 		if not Path(model_path).exists():
