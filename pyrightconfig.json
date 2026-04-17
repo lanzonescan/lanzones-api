@@ -1,0 +1,11 @@
+{
+	"include": ["src", "tests"],
+	"typeCheckingMode": "strict",
+	"reportMissingTypeStubs": "none",
+	"reportUnknownMemberType": "none",
+	"reportUnknownArgumentType": "none",
+	"reportUnknownVariableType": "none",
+	"reportUnknownParameterType": "warning",
+	"reportMissingParameterType": "error",
+	"reportUntypedFunctionDecorator": "none"
+}
