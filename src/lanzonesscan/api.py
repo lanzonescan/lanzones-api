@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 	yield
 
 
-app = FastAPI(title='Lanzones Leaf Scan API', version='0.1.0', lifespan=lifespan)
+app = FastAPI(title='Lanzones Scan API', version='0.1.0', lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
 
