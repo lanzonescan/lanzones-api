@@ -22,6 +22,8 @@ PRETRAINED_WEIGHTS = 'yolov8s.pt'
 DEFAULT_EPOCHS = 50
 DEFAULT_DEVICE = 'mps'
 
+PROXY_SECRET = os.environ.get('PROXY_SECRET') or None
+
 JWT_SECRET = os.environ.get('JWT_SECRET')
 JWT_ALGORITHM = os.environ.get('JWT_ALGORITHM', 'HS256')
 JWT_LEEWAY_SECONDS = int(os.environ.get('JWT_LEEWAY_SECONDS', '0'))

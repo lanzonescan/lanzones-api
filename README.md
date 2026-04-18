@@ -191,6 +191,7 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | `JWT_LEEWAY_SECONDS` | `0` | no | Clock skew tolerance for `exp` / `nbf`. |
 | `JWT_ISSUER` | unset | no | If set, `iss` claim must match. |
 | `JWT_AUDIENCE` | unset | no | If set, `aud` claim must match. |
+| `PROXY_SECRET` | unset | no | If set, `/analyze` requires header `X-Proxy-Secret` to match. Used to let a Cloudflare WAF Skip rule trust traffic from the SvelteKit proxy. |
 | `RATE_LIMIT_PER_SUB` | `10/minute` | no | Per-JWT-subject limit. SlowAPI syntax. |
 | `RATE_LIMIT_PER_IP` | `30/minute` | no | Per-IP limit. |
 | `MODEL_PATH` | `./models/best.pt` | no | Absolute path to YOLO weights. Set to `/app/models/best.pt` in the Docker image. |

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request
@@ -47,3 +48,12 @@ def get_current_subject(
 
 	request.state.subject = sub
 	return sub
+
+
+def require_proxy_secret(request: Request) -> None:
+	expected = config.PROXY_SECRET
+	if not expected:
+		return
+	provided = request.headers.get('x-proxy-secret', '')
+	if not hmac.compare_digest(provided, expected):
+		raise HTTPException(status_code=403, detail='Forbidden')

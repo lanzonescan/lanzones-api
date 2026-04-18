@@ -13,7 +13,7 @@ from PIL import Image, UnidentifiedImageError
 from slowapi.errors import RateLimitExceeded
 
 from lanzonesscan import config
-from lanzonesscan.auth import get_current_subject
+from lanzonesscan.auth import get_current_subject, require_proxy_secret
 from lanzonesscan.config import ACCEPTED_MIME, DEFAULT_CONF, MODEL_PATH
 from lanzonesscan.inference import Detection, LanzonesDetector
 from lanzonesscan.rate_limit import key_by_ip, key_by_sub, limiter, rate_limit_handler
@@ -57,6 +57,7 @@ def analyze(
 	file: UploadFile = File(...),
 	conf: float = Query(DEFAULT_CONF, ge=0.0, le=1.0),
 	annotated: bool = Query(False),
+	_: None = Depends(require_proxy_secret),
 	subject: str = Depends(get_current_subject),
 	detector: LanzonesDetector = Depends(get_detector)
 ) -> dict[str, Any]:
