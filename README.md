@@ -7,16 +7,17 @@ A FastAPI service that detects lanzones crop conditions from an uploaded image u
 ## Table of contents
 
 1. [Overview](#overview)
-2. [How the system works](#how-the-system-works)
-3. [Local environment setup](#local-environment-setup)
-4. [Environment variables](#environment-variables)
-5. [API reference](#api-reference)
-6. [Training](#training)
-7. [Testing](#testing)
-8. [GitHub setup](#github-setup)
-9. [VPS setup (Dokploy host)](#vps-setup-dokploy-host)
-10. [Dokploy deployment](#dokploy-deployment)
-11. [Operations and troubleshooting](#operations-and-troubleshooting)
+2. [Tech stack](#tech-stack)
+3. [How the system works](#how-the-system-works)
+4. [Local environment setup](#local-environment-setup)
+5. [Environment variables](#environment-variables)
+6. [API reference](#api-reference)
+7. [Training](#training)
+8. [Testing](#testing)
+9. [GitHub setup](#github-setup)
+10. [VPS setup (Dokploy host)](#vps-setup-dokploy-host)
+11. [Dokploy deployment](#dokploy-deployment)
+12. [Operations and troubleshooting](#operations-and-troubleshooting)
 
 ---
 
@@ -53,6 +54,53 @@ model-api/
 │   └── data_setup.py         # unpacks the Roboflow zip (dev only)
 └── tests/                    # pytest suite
 ```
+
+---
+
+## Tech stack
+
+### Language and runtime
+
+- **Python 3.11+** — minimum interpreter version enforced in `pyproject.toml`.
+- **Docker** — multi-stage CPU-only image; weights fetched during build via `curl`.
+- **Uvicorn** (`uvicorn[standard]>=0.44.0`) — ASGI server, single worker per container.
+
+### Web framework and I/O
+
+| Package | Version floor | Role |
+|---|---|---|
+| `fastapi` | `>=0.136.0` | HTTP framework, OpenAPI docs, dependency injection |
+| `python-multipart` | `>=0.0.26` | `multipart/form-data` parsing for image uploads |
+| `pydantic` | `>=2.13.2` | Request/response models and config validation |
+| `pillow` | `>=12.2.0` | Image decoding and annotated-image encoding |
+
+### Machine learning
+
+| Package | Version floor | Role |
+|---|---|---|
+| `ultralytics` | `>=8.4.38` | YOLOv8 model loader, training CLI, prediction pipeline |
+| `torch` (CPU) | (transitive) | Tensor backend; pinned to CPU wheels in the Dockerfile |
+| `opencv-python-headless` | (transitive) | Image ops used by ultralytics |
+
+### Auth and rate limiting
+
+| Package | Version floor | Role |
+|---|---|---|
+| `PyJWT` | `>=2.12.1` | HS256/RS256 JWT verification (`iss`, `aud`, `exp`, `nbf`) |
+| `slowapi` | `>=0.1.9` | Per-subject and per-IP rate limits with `Retry-After` headers |
+
+### Dev and test
+
+| Package | Version floor | Role |
+|---|---|---|
+| `pytest` | `>=9.0.3` | Test runner |
+| `httpx` | `>=0.28.1` | ASGI test client for FastAPI |
+
+### Infrastructure
+
+- **Dokploy** — app orchestration on the VPS, handles Docker build/deploy.
+- **Traefik** (bundled with Dokploy) — TLS termination, Let's Encrypt, routing.
+- **GitHub Releases** — weight artifact storage; the repo itself never holds `.pt` files.
 
 ---
 
