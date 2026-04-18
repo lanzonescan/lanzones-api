@@ -38,12 +38,22 @@ WORKDIR /app
 ARG WEIGHTS_URL
 ARG GITHUB_TOKEN=""
 RUN mkdir -p /app/models && \
-	if [ -z "$WEIGHTS_URL" ]; then echo 'WEIGHTS_URL build arg is required' >&2; exit 1; fi && \
+	if [ -z "$WEIGHTS_URL" ]; then \
+		echo 'ERROR: WEIGHTS_URL build arg is not set. In Dokploy this must be under Build Arguments, not Environment.' >&2; \
+		exit 1; \
+	fi && \
+	echo "Fetching weights from: $(echo $WEIGHTS_URL | sed 's/\?.*//')" && \
 	if [ -n "$GITHUB_TOKEN" ]; then \
-		curl -fL -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/octet-stream" "$WEIGHTS_URL" -o /app/models/best.pt; \
+		curl --fail-with-body -sSL --retry 3 --retry-delay 2 --connect-timeout 15 \
+			-H "Authorization: Bearer $GITHUB_TOKEN" \
+			-H "Accept: application/octet-stream" \
+			"$WEIGHTS_URL" -o /app/models/best.pt; \
 	else \
-		curl -fL "$WEIGHTS_URL" -o /app/models/best.pt; \
-	fi
+		curl --fail-with-body -sSL --retry 3 --retry-delay 2 --connect-timeout 15 \
+			"$WEIGHTS_URL" -o /app/models/best.pt; \
+	fi && \
+	test -s /app/models/best.pt && \
+	echo "Downloaded $(stat -c%s /app/models/best.pt 2>/dev/null || stat -f%z /app/models/best.pt) bytes"
 
 RUN chown -R app:app /app
 USER app
