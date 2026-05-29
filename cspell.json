@@ -1,0 +1,28 @@
+{
+	"version": "0.2",
+	"language": "en",
+	"words": [
+		"CUDA",
+		"Conv",
+		"Darknet",
+		"Dokploy",
+		"GFLOPs",
+		"Softmax",
+		"Ultralytics",
+		"downsamples",
+		"healthcheck",
+		"imgsz",
+		"lanzonesscan",
+		"letterboxed",
+		"logits",
+		"pretrained",
+		"pyproject",
+		"pytest",
+		"softmax",
+		"unpad",
+		"uvicorn",
+		"venv",
+		"virtualenv",
+		"yolov"
+	]
+}
