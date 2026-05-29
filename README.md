@@ -212,6 +212,114 @@ Result: for each leaf in the image, one box + one class label + one confidence s
 - The head produces one box per leaf with a class distribution; NMS keeps one per leaf.
 - Output to the Svelte client: `[{class: 'leaf-rust', conf: 0.87, box: [x1, y1, x2, y2]}, ...]`.
 
+#### Pseudo-algorithm
+
+End-to-end inference for a single uploaded image. Training reuses steps 1–4, replaces 5 with loss computation against ground truth, and skips 6–7.
+
+```
+INPUT:  image_bytes        # raw bytes from POST /analyze
+        conf_threshold     # 0.25 by default
+        iou_threshold      # 0.7 default for NMS
+        imgsz              # 640
+OUTPUT: detections         # list of {class, confidence, bbox}
+
+# ── 1. Preprocessing ────────────────────────────────────────────
+img        = decode(image_bytes)                  # H × W × 3, uint8, BGR
+H0, W0     = img.shape[:2]                        # remember for un-letterbox
+scale      = imgsz / max(H0, W0)
+new_h, new_w = round(H0 * scale), round(W0 * scale)
+img        = resize(img, new_w, new_h)            # keep aspect ratio
+pad_h      = imgsz - new_h
+pad_w      = imgsz - new_w
+img        = pad(img, top=pad_h // 2,             # gray (114,114,114)
+                       bottom=pad_h - pad_h // 2,
+                       left=pad_w // 2,
+                       right=pad_w - pad_w // 2,
+                       value=(114, 114, 114))
+img        = bgr_to_rgb(img)
+img        = transpose(img, (2, 0, 1))            # C × H × W
+img        = img.astype(float32) / 255.0
+x          = unsqueeze(img, 0)                    # 1 × 3 × 640 × 640
+x          = to_device(x, 'mps')
+
+# ── 2. Backbone (CSPDarknet) ────────────────────────────────────
+f1         = stem(x)                              # 320 × 320
+f2         = stage_P2(f1)                         # 160 × 160
+P3         = stage_P3(f2)                         #  80 × 80  ← small objects
+P4         = stage_P4(P3)                         #  40 × 40  ← medium
+P5         = stage_P5(P4)                         #  20 × 20  ← large
+
+# ── 3. Neck (PAN-FPN) ───────────────────────────────────────────
+# top-down: deep semantics flow into shallow maps
+U5         = upsample(P5)
+N4         = fuse(U5, P4)
+U4         = upsample(N4)
+N3         = fuse(U4, P3)
+# bottom-up: precise localization flows back up
+D3         = N3
+D4         = fuse(downsample(D3), N4)
+D5         = fuse(downsample(D4), P5)
+pyramids   = [D3, D4, D5]                         # 80², 40², 20² maps
+
+# ── 4. Detection head (anchor-free, decoupled) ──────────────────
+all_preds  = []
+for fmap, stride in zip(pyramids, [8, 16, 32]):
+    cls_logits = cls_branch(fmap)                 # B × n_classes × Hf × Wf
+    box_logits = reg_branch(fmap)                 # B × 4*(reg_max+1) × Hf × Wf
+    # DFL: convert distance distributions → expectations (one float per edge)
+    dist       = dfl_expectation(box_logits)      # B × 4 × Hf × Wf
+    # decode each cell (cx, cy) into pixel-space (x1, y1, x2, y2)
+    for cy in range(Hf):
+        for cx in range(Wf):
+            center_x = (cx + 0.5) * stride
+            center_y = (cy + 0.5) * stride
+            dl, dt, dr, db = dist[:, :, cy, cx]
+            box   = (center_x - dl * stride,
+                     center_y - dt * stride,
+                     center_x + dr * stride,
+                     center_y + db * stride)
+            score = sigmoid(cls_logits[:, :, cy, cx])
+            all_preds.append((box, score))        # 8400 total
+
+# ── 5. Confidence filter ────────────────────────────────────────
+candidates = []
+for box, score in all_preds:
+    cls_id     = argmax(score)
+    confidence = score[cls_id]
+    if confidence >= conf_threshold:
+        candidates.append((box, cls_id, confidence))
+
+# ── 6. Non-max suppression (per class) ──────────────────────────
+kept = []
+for cls_id in unique_classes(candidates):
+    group = [c for c in candidates if c.cls_id == cls_id]
+    sort(group, by=confidence, descending=True)
+    while group:
+        best = group.pop(0)
+        kept.append(best)
+        group = [c for c in group if iou(c.box, best.box) < iou_threshold]
+
+# ── 7. Un-letterbox → original image coordinates ────────────────
+detections = []
+for box, cls_id, confidence in kept:
+    x1, y1, x2, y2 = box
+    x1 = (x1 - pad_w // 2) / scale
+    y1 = (y1 - pad_h // 2) / scale
+    x2 = (x2 - pad_w // 2) / scale
+    y2 = (y2 - pad_h // 2) / scale
+    x1 = clamp(x1, 0, W0); x2 = clamp(x2, 0, W0)
+    y1 = clamp(y1, 0, H0); y2 = clamp(y2, 0, H0)
+    detections.append({
+        'class':      CLASS_NAMES[cls_id],
+        'confidence': float(confidence),
+        'bbox':       [x1, y1, x2, y2],
+    })
+
+return detections
+```
+
+Mapping back to the codebase: steps 1–7 are wrapped by `YOLO.predict(...)` inside `LanzonesDetector` (`src/lanzonesscan/inference.py`); only the surrounding JSON-shaping and optional `annotated=true` rendering live in `api.py`.
+
 ### DFL — Distribution Focal Loss
 
 The trick that lets YOLOv8 predict box edges with **sub-pixel precision** without using anchors.
