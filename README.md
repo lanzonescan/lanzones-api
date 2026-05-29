@@ -9,15 +9,16 @@ A FastAPI service that detects lanzones crop conditions from an uploaded image u
 1. [Overview](#overview)
 2. [Tech stack](#tech-stack)
 3. [How the system works](#how-the-system-works)
-4. [Local environment setup](#local-environment-setup)
-5. [Environment variables](#environment-variables)
-6. [API reference](#api-reference)
-7. [Training](#training)
-8. [Testing](#testing)
-9. [GitHub setup](#github-setup)
-10. [VPS setup (Dokploy host)](#vps-setup-dokploy-host)
-11. [Dokploy deployment](#dokploy-deployment)
-12. [Operations and troubleshooting](#operations-and-troubleshooting)
+4. [Model internals](#model-internals)
+5. [Local environment setup](#local-environment-setup)
+6. [Environment variables](#environment-variables)
+7. [API reference](#api-reference)
+8. [Training](#training)
+9. [Testing](#testing)
+10. [GitHub setup](#github-setup)
+11. [VPS setup (Dokploy host)](#vps-setup-dokploy-host)
+12. [Dokploy deployment](#dokploy-deployment)
+13. [Operations and troubleshooting](#operations-and-troubleshooting)
 
 ---
 
@@ -125,6 +126,174 @@ model-api/
 - **Model is loaded once at startup** in the FastAPI lifespan hook, not per request.
 - **`JWT_SECRET` is required at startup.** The lifespan hook calls `config.require_jwt_secret()` and the process fails fast if it is missing.
 - **Weights path is env-driven.** `MODEL_PATH` env var overrides the default `models/best.pt`. In the Docker image it is set to `/app/models/best.pt`.
+
+---
+
+## Model internals
+
+This section explains what the YOLOv8s model does to an image internally, both at training time (`train.py`) and at inference time (`inference.py`). Useful when tuning `imgsz`, `conf`, or interpreting training logs.
+
+### How YOLO analyzes and processes an image
+
+Setup recap: `YOLOv8s` pretrained on COCO, fine-tuned at `imgsz=640` on 4 classes (`dried-leaf`, `healthy`, `leaf-rust`, `powdery-mildew`) via Ultralytics. Every image goes through the following stages end-to-end.
+
+#### 1. Preprocessing — image → tensor
+
+For each image (training or inference):
+
+1. **Letterbox resize to 640×640.** The image is scaled so its longer side = 640, then padded with gray (114, 114, 114) on the shorter side to keep aspect ratio. This avoids distortion that would warp leaf shapes.
+2. **BGR → RGB**, then transposed from `H×W×C` to `C×H×W`.
+3. **Normalize** pixel values `0..255 → 0..1` (float32, or float16 on MPS).
+4. **Batch** into a `(B, 3, 640, 640)` tensor on `mps` (the `DEFAULT_DEVICE`).
+
+During training only, Ultralytics also applies augmentations before step 1: Mosaic (4-image collage), HSV jitter, horizontal flip, scale/translate, and optionally MixUp. Mosaic teaches the model context at varied scales — useful for leaf disease that can appear as small patches.
+
+#### 2. Backbone — feature extraction (CSPDarknet)
+
+The 640×640 tensor flows through a CSPDarknet-style CNN that progressively downsamples:
+
+```
+640×640 → 320×320 → 160×160 → 80×80 → 40×40 → 20×20
+ (stem)    (P1)      (P2)      (P3)    (P4)    (P5)
+```
+
+At each stage, `Conv → C2f → ...` blocks extract increasingly abstract features. Early layers see edges/color (good for rust spots vs. mildew dust); deep layers see whole-leaf shape and texture. The "s" in `yolov8s` means **small** — ~11M params, ~28 GFLOPs — a speed/accuracy trade chosen because the dataset and target hardware (MPS / mobile) are modest.
+
+#### 3. Neck — multi-scale fusion (PAN-FPN)
+
+The neck combines feature maps from P3 (80×80), P4 (40×40), P5 (20×20):
+
+- **Top-down (FPN)**: upsample deep semantic features and add to shallower ones — so the 80×80 map knows *what* it's looking at, not just *where*.
+- **Bottom-up (PAN)**: downsample and add back — so the 20×20 map keeps localization detail.
+
+Three feature pyramids come out the other side: 80×80 detects **small** lesions, 40×40 detects **medium** patches, 20×20 detects **large** leaf-level signals.
+
+#### 4. Head — anchor-free decoupled prediction
+
+YOLOv8 uses a **decoupled, anchor-free** head. For every cell in each of the three pyramids:
+
+- **Classification branch** → 4 logits (one per class in `CLASS_NAMES`).
+- **Regression branch** → 4 distances (left, top, right, bottom) from the cell center to the predicted box edges, encoded as **DFL** (Distribution Focal Loss) — see below.
+
+Total raw predictions per image: `80² + 40² + 20² = 8400` candidate boxes.
+
+#### 5. Loss — what the model is being optimized for
+
+During `model.train(...)`, three losses are summed per batch:
+
+| Loss | Purpose | Function |
+|---|---|---|
+| `box` | Box localization | CIoU |
+| `cls` | Class prediction | BCE with logits |
+| `dfl` | Sub-pixel box refinement | Distribution Focal Loss |
+
+Targets are matched to predictions via **TaskAlignedAssigner** (no anchors, no IoU thresholds — it picks the top-k cells whose joint cls-score × IoU is highest for each ground-truth box). This is what makes YOLOv8 anchor-free.
+
+#### 6. Post-processing — raw outputs → final boxes
+
+At inference (and during validation each epoch):
+
+1. **Confidence filter**: drop boxes with `max class prob < conf` (the `DEFAULT_CONF = 0.25`).
+2. **NMS** (non-max suppression, per class): keep the highest-confidence box in any cluster of overlapping boxes (IoU > 0.7 default).
+3. **Letterbox-invert**: unscale and unpad boxes back to original image coordinates so you get pixel boxes on the real image.
+
+Result: for each leaf in the image, one box + one class label + one confidence score — exactly the shape returned by `/analyze`.
+
+#### 7. What `train.py` actually drives
+
+- `YOLO('yolov8s.pt')` — load COCO-pretrained weights (the backbone + neck already know edges, textures, leaf-like shapes). Only the head's class predictor is reinitialized for 4 classes.
+- `model.train(data=data_yaml, ...)` — runs the full loop above for `epochs=50`, validating each epoch, saving `last.pt` and `best.pt` (best = highest val mAP@0.5:0.95).
+- `_find_best_weights` then copies `models/run/weights/best.pt` to `models/best.pt`, which the API serves.
+
+#### Concretely for lanzones leaves
+
+- A 4000×3000 phone photo of a leaf → letterboxed to 640×480 inside a 640×640 gray canvas.
+- Backbone extracts texture: powdery-mildew shows up as a high-frequency white pattern on the P3 map; leaf-rust shows up as orange-channel blobs on P3/P4; dried-leaf is a low-saturation global signal that dominates P5.
+- The head produces one box per leaf with a class distribution; NMS keeps one per leaf.
+- Output to the Svelte client: `[{class: 'leaf-rust', conf: 0.87, box: [x1, y1, x2, y2]}, ...]`.
+
+### DFL — Distribution Focal Loss
+
+The trick that lets YOLOv8 predict box edges with **sub-pixel precision** without using anchors.
+
+#### The problem it solves
+
+A detection head has to predict 4 numbers per box: distances from the cell center to the **left, top, right, bottom** edges (call each one `d`).
+
+The naive approach: regress `d` directly as a single float — e.g. "the left edge is 7.3 cells away." But:
+
+- A single point estimate gives the model no way to express **uncertainty**. Is it 7.3 ± 0.1 (sharp edge) or 7.3 ± 2.0 (blurry, occluded edge)?
+- Single-float regression with L1/L2 loss is notoriously **noisy near object boundaries** — the gradient is the same whether you're off by 0.5 px or 0.5 of a feature cell.
+- Anchor-based heads dodged this by predicting offsets *from* an anchor — but YOLOv8 is anchor-free.
+
+DFL fixes this by predicting a **discrete probability distribution** over possible distances, then taking its expectation.
+
+#### The construction
+
+Pick a max distance `reg_max` (YOLOv8 default: **16**). For each of the 4 edges, the head outputs **17 logits** — one per integer bucket `0, 1, 2, ..., 16`. Softmax those logits into a distribution `P(d = i)` for `i ∈ {0..16}`.
+
+```
+edge logits:  [l₀, l₁, l₂, ..., l₁₆]   ← 17 numbers per edge
+softmax    →  [p₀, p₁, p₂, ..., p₁₆]   ← probabilities, sum to 1
+expectation:  d̂ = Σ i · pᵢ              ← a single float, but continuous
+```
+
+Because `d̂` is a weighted average over integer buckets, it can land on **any real value** in `[0, 16]` — e.g. `d̂ = 7.3` arises naturally if probability mass clusters around buckets 7 and 8. That's the "sub-pixel" part.
+
+So per box: `4 edges × 17 buckets = 68 numbers` are predicted (vs. just 4 in naive regression). For a feature-map cell at the 80×80 level, one bucket unit corresponds to one **stride** of 8 pixels on the original image — so `reg_max=16` means the head can describe edges up to 128 px from the cell center, with sub-pixel resolution everywhere in between.
+
+#### The loss
+
+The ground-truth distance for an edge is some real number `y` (e.g. `y = 7.3`). DFL turns this into a target over the two adjacent buckets:
+
+```
+y = 7.3  →  bucket 7 gets weight (8 - 7.3) = 0.7
+            bucket 8 gets weight (7.3 - 7) = 0.3
+            all others: 0
+```
+
+Then it applies **cross-entropy** against the predicted distribution at just those two buckets:
+
+```
+DFL = -[(y_high - y) · log(p_⌊y⌋)  +  (y - y_low) · log(p_⌈y⌉)]
+    = -[ 0.7 · log(p₇)             +  0.3 · log(p₈)            ]
+```
+
+The "focal" name comes from the original paper (Generalized Focal Loss, Li et al. 2020) — it focuses learning on the two buckets that bracket the truth, leaving the model free to assign zero probability everywhere else.
+
+#### Why this works better than direct regression
+
+1. **Uncertainty is first-class.** A sharp leaf edge produces a tight spike in the distribution (`p₇ ≈ 1.0`). A fuzzy/occluded edge produces a wide hump (`p₆ ≈ 0.2, p₇ ≈ 0.5, p₈ ≈ 0.3`). The expected value is the same in both cases, but the **shape** is different — and downstream IoU-based losses can exploit it.
+2. **Smooth gradients near integer boundaries.** With direct L1, a target of `7.5` is equidistant from any prediction in `[7, 8]` — the gradient is flat. With DFL, the target puts equal mass on buckets 7 and 8, and the cross-entropy gradient points the distribution toward exactly that split.
+3. **Implicit regularization.** Forcing predictions through softmax + 17 buckets caps the loss landscape — you can't predict `d = 10000` and explode the gradient. `reg_max=16` bounds the expressible range to something physically reasonable.
+4. **Works hand-in-hand with CIoU.** YOLOv8's box loss is `λ_box · CIoU + λ_dfl · DFL`. CIoU shapes the *overall* box (location, scale, aspect ratio); DFL sharpens *each individual edge*. They optimize complementary things.
+
+#### At inference
+
+The distribution is discarded and only the expectation is used:
+
+```python
+d_hat = sum(i * softmax(logits)[i] for i in range(reg_max + 1))  # one float per edge
+```
+
+then `(d_left, d_top, d_right, d_bottom)` are converted from "cell-stride units" back to pixel coordinates using the cell's `(cx, cy)` and the feature-map stride. The distribution itself is internal training machinery — runtime cost is just one softmax + one dot product per edge.
+
+#### In the training logs
+
+`model.train(...)` in `src/lanzonesscan/train.py` configures DFL from the YOLOv8s spec — there's nothing to tune directly. But the per-epoch log shows three numbers:
+
+```
+Epoch    GPU_mem   box_loss   cls_loss   dfl_loss   ...
+  1/50    2.3G       1.45        2.10       1.30
+  ...
+ 50/50    2.3G       0.41        0.18       0.85
+```
+
+`dfl_loss` plateauing well above zero is normal — it measures distribution sharpness, not bounding-box correctness. The metric to actually watch is **mAP**, reported below those losses each validation epoch.
+
+#### Tuning knob
+
+If lanzones leaves are large and roughly centered (typical phone shots), the default `reg_max=16` × stride is plenty. If the task ever switched to detecting **small** disease spots tightly cropped on a leaf, lowering `reg_max` (e.g. 8) would give the distribution finer resolution within a smaller distance range — but that's a model architecture change, not a flag, so rarely worth it. Usually just train longer or bump `imgsz` above 640 instead.
 
 ---
 
